@@ -1,11 +1,12 @@
+import csv
+import sys
 from datetime import datetime
-from typing import IO
+from typing import IO, Iterable
 
-import json
 import nltk
 import wikitextparser as wtp
 from mediawiki import MediaWiki
-from mediawiki.exceptions import PageError
+from mediawiki.exceptions import PageError, DisambiguationError
 from ratelimit import limits, sleep_and_retry
 
 """
@@ -20,30 +21,12 @@ wikis = {
     "wikipedia": MediaWiki()  # default is wikipedia
 }
 
-# some global settings: TODO: make some of these into command-line parameters
-num_pages = 2
-timestamp = f"{datetime.now().year}_{datetime.now().month}_{datetime.now().day}"
-corpus_file = f"./data/wiki_corpus_{timestamp}.json"
-max_calls_per_minute = 30
-one_minute = 60
-
-
-class Parser:
-    """
-    Parse text into lists of words
-    """
-    word_tokenizer = nltk.tokenize.RegexpTokenizer(r"\w+")
-
-    def __init__(self, text):
-        self.sentences = nltk.sent_tokenize(text.lower())
-
-    def __iter__(self):
-        for s in self.sentences:
-            yield Parser.word_tokenizer.tokenize(s)
+MAX_CALLS_PER_MINUTE = 30
+ONE_MINUTE = 60
 
 
 @sleep_and_retry
-@limits(calls=max_calls_per_minute, period=one_minute)
+@limits(calls=MAX_CALLS_PER_MINUTE, period=ONE_MINUTE)
 def get_page_text(wiki: MediaWiki, name: str, title: str) -> str:
     """
     Extract plain text from wiki page
@@ -54,7 +37,7 @@ def get_page_text(wiki: MediaWiki, name: str, title: str) -> str:
     """
     try:
         page = wiki.page(title)
-    except PageError as e:
+    except (PageError, DisambiguationError) as e:
         # note error but continue with other pages
         print(f"Page {title} generates error on {name}")
         return None
@@ -68,32 +51,51 @@ def get_page_text(wiki: MediaWiki, name: str, title: str) -> str:
             raise RuntimeError(f"Unexpected type {type(wiki_fied)} for title {title} on {name}")
 
 
-def write_to_corpus(name: str, file: IO[str], parser: Parser) -> None:
+def write_to_corpus(name: str, file: IO[str], parser: Iterable) -> None:
     """
-    Write raw_text to file in json format
+    Write raw_text to file in csv format
     :param name: Name of wiki for purpose of labelling
     :param file: File object
     :param parser: Parser that will generate text to be written
     :return: None
     """
-    timestamp = str(datetime.now())
+    writer = csv.writer(file, delimiter=",", quotechar="\"", quoting=csv.QUOTE_NONNUMERIC)
     for sentence in parser:
-        json_data = {
-            "timestamp": timestamp,
-            "id": id(sentence),
-            "source": name,
-            "sentence": sentence
-        }
-        json.dump(json_data, file)
+        writer.writerow([
+            datetime.now().strftime('%Y%m%d%H%M%S%f'),
+            name,
+            sentence
+        ])
 
 
-with open(corpus_file, "w") as output_file:
-    for wiki_name, media_wiki in wikis.items():
-        print(f"Processing: {wiki_name}")
-        page_titles = media_wiki.random(num_pages)
-        print(f"Page titles: {page_titles}")
-        for page_title in page_titles:
-            raw_text = get_page_text(media_wiki, wiki_name, page_title)
-            if raw_text:
-                print(f"Got {len(raw_text)} characters from {wiki_name}")
-                write_to_corpus(wiki_name, output_file, nltk.sent_tokenize(raw_text.lower()))
+def normalize(text: str) -> str:
+    """
+    Perform some basic text normalization
+    :param text: text to normalize
+    :return: normalized text
+    """
+    return text.lower().replace("\n", "")
+
+
+if __name__ == '__main__':
+
+    num_pages = int(sys.argv[1]) if len(sys.argv) > 1 else 2
+
+    timestamp = f"{datetime.now().year}_{datetime.now().month}_{datetime.now().day}"
+    corpus_file = f"./data/wiki_corpus_{timestamp}.csv"
+
+    with open(corpus_file, "w") as output_file:
+        output_file.write("id,source,sentence\n")
+        for wiki_name, media_wiki in wikis.items():
+            print(f"Processing: {wiki_name}")
+            page_titles = media_wiki.random(num_pages)
+            print(f"Page titles: {page_titles}")
+            for page_title in page_titles:
+                raw_text = get_page_text(media_wiki, wiki_name, page_title)
+                if raw_text:
+                    print(f"Got {len(raw_text)} characters from {wiki_name}")
+                    write_to_corpus(
+                        wiki_name,
+                        output_file,
+                        nltk.sent_tokenize(normalize(raw_text))
+                    )
