@@ -87,7 +87,9 @@ if __name__ == '__main__':
     with open(corpus_file, "w") as output_file:
         output_file.write("id,source,sentence\n")
         for wiki_name, media_wiki in wikis.items():
-            print(f"Processing: {wiki_name}")
+            # conservapedia seems to return 10 pages at most and they're non-random
+            # TODO: Figure out how to get enough content from this wiki.
+            print(f"Processing {num_pages} from {wiki_name}")
             page_titles = media_wiki.random(num_pages)
             print(f"Page titles: {page_titles}")
             for page_title in page_titles:
