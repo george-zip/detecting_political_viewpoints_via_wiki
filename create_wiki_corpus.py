@@ -15,10 +15,13 @@ suitable for classification. Uses a wrapper around the MediaWiki API.
 Rate limits to avoid overwhelming MediaWiki end points on Wiki sites.  
 """
 
+user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)"\
+    "Chrome/98.0.4758.80 Safari/537.36"
+
 wikis = {
-    "conservapedia": MediaWiki("https://www.conservapedia.com/api.php"),
-    "rational": MediaWiki("https://rationalwiki.org/w/api.php"),
-    "wikipedia": MediaWiki()  # default is wikipedia
+    "conservapedia": MediaWiki("https://www.conservapedia.com/api.php", user_agent=user_agent),
+    "rational": MediaWiki("https://rationalwiki.org/w/api.php", user_agent=user_agent),
+    "wikipedia": MediaWiki(user_agent=user_agent)  # default is wikipedia
 }
 
 MAX_CALLS_PER_MINUTE = 30
