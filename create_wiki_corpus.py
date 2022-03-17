@@ -1,10 +1,12 @@
 import csv
 import sys
+import re
 from datetime import datetime
 from typing import IO, Iterable
 
 import nltk
 import wikitextparser as wtp
+import mwparserfromhell as mwp
 from mediawiki import MediaWiki
 from mediawiki.exceptions import PageError, DisambiguationError
 from ratelimit import limits, sleep_and_retry
@@ -20,11 +22,12 @@ user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
 
 wikis = {
     "conservapedia": MediaWiki("https://www.conservapedia.com/api.php", user_agent=user_agent),
-    "rational": MediaWiki("https://rationalwiki.org/w/api.php", user_agent=user_agent),
-    "wikipedia": MediaWiki(user_agent=user_agent)  # default is wikipedia
+    "metapedia": MediaWiki("https://en.metapedia.org/m/api.php"),
+    "wikipedia": MediaWiki(user_agent=user_agent),  # default is wikipedia
+    "powerbase": MediaWiki("https://powerbase.info/api.php")
 }
 
-MAX_CALLS_PER_MINUTE = 30
+MAX_CALLS_PER_MINUTE = 45
 ONE_MINUTE = 60
 
 
@@ -47,9 +50,11 @@ def get_page_text(wiki: MediaWiki, name: str, title: str) -> str:
     else:
         wiki_fied = page.wikitext
         if isinstance(wiki_fied, str):
-            return wtp.parse(wiki_fied).plain_text()
+            # return wtp.parse(wiki_fied).plain_text()
+            return mwp.parse(wiki_fied).strip_code()
         elif isinstance(wiki_fied, dict):
-            return wtp.parse(wiki_fied["*"]).plain_text()
+            # return wtp.parse(wiki_fied["*"]).plain_text()
+            return mwp.parse(wiki_fied["*"]).strip_code()
         else:
             raise RuntimeError(f"Unexpected type {type(wiki_fied)} for title {title} on {name}")
 
@@ -63,12 +68,15 @@ def write_to_corpus(name: str, file: IO[str], parser: Iterable) -> None:
     :return: None
     """
     writer = csv.writer(file, delimiter=",", quotechar="\"", quoting=csv.QUOTE_NONNUMERIC)
+    count = 0
     for sentence in parser:
         writer.writerow([
             datetime.now().strftime('%Y%m%d%H%M%S%f'),
             name,
             sentence
         ])
+        count += 1
+    return count
 
 
 def normalize(text: str) -> str:
@@ -77,7 +85,18 @@ def normalize(text: str) -> str:
     :param text: text to normalize
     :return: normalized text
     """
-    return text.lower().replace("\n", "")
+    text = text.lower()
+    text = re.sub(r"category:[\w+| ]+", "", text)
+    text = re.sub(r"==[\w+| ]+==", " ", text)
+    text = re.sub(r"^thumb\|.*", "", text)
+    text = re.sub(r"external links.*", "", text)
+    text = re.sub(r"^encyclopedias .*", "", text)
+    text = re.sub(r"encyclopedia britannica\: .*", "", text)
+    text = re.sub(r"encyclopedia.com\: .*", "", text)
+    text = re.sub(r"isbn [\d+|-]+.", "", text)
+    text = re.sub(r"metapedia", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
 
 
 if __name__ == '__main__':
@@ -90,17 +109,18 @@ if __name__ == '__main__':
     with open(corpus_file, "w") as output_file:
         output_file.write("id,source,sentence\n")
         for wiki_name, media_wiki in wikis.items():
-            # conservapedia seems to return 10 pages at most and they're non-random
-            # TODO: Figure out how to get enough content from this wiki.
+            sentence_count = 0
             print(f"Processing {num_pages} from {wiki_name}")
             page_titles = media_wiki.random(num_pages)
-            print(f"Page titles: {page_titles}")
+            print(f"Page titles ({len(page_titles)}: {page_titles}")
             for page_title in page_titles:
+                print(f"Processing {page_title}")
                 raw_text = get_page_text(media_wiki, wiki_name, page_title)
+                text = normalize(raw_text)
                 if raw_text:
-                    print(f"Got {len(raw_text)} characters from {wiki_name}")
-                    write_to_corpus(
+                    sentence_count += write_to_corpus(
                         wiki_name,
                         output_file,
-                        nltk.sent_tokenize(normalize(raw_text))
+                        nltk.sent_tokenize(text)
                     )
+            print(f"Wrote {sentence_count} sentences from {wiki_name}")
