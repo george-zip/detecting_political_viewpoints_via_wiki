@@ -28,6 +28,7 @@ rational_rdd.count()
 # COMMAND ----------
 
 from pyspark.sql.types import StructField, StructType, StringType
+from pyspark.sql.functions import col
 
 rational_schema = StructType([
     StructField("source", StringType()),
@@ -36,7 +37,7 @@ rational_schema = StructType([
 
 rational_df = spark.createDataFrame(rational_rdd, rational_schema)
 rational_df = rational_df.dropDuplicates()
-rational_df.count()
+# rational_df.count()
 # rational_df.sample(True, 0.00001).toPandas()
 
 # COMMAND ----------
@@ -55,7 +56,7 @@ metapedia_df = spark.read.schema(metapedia_schema)\
   .option("recursiveFileLookup", "true")\
   .option("header", "true")\
   .csv("s3://wallerstein-wikipedia-bias/metapedia/")
-metapedia_df = metapedia_df.dropDuplicates()
+metapedia_df = metapedia_df.drop("id").dropDuplicates()
 metapedia_df.count()
 
 # COMMAND ----------
@@ -78,7 +79,7 @@ from pyspark.ml.feature import RegexTokenizer, Tokenizer
 
 regex_tokenizer = RegexTokenizer(inputCol="sample_clean", outputCol="words", gaps=False, pattern="[a-zA-Z]+")
 tokenized = regex_tokenizer.transform(all_df)
-tokenized.sample(True, 0.00001).toPandas()
+tokenized.sample(True, 0.00003).toPandas()
 
 # COMMAND ----------
 
@@ -92,6 +93,7 @@ wiki_data = cv_model.transform(tokenized)
 # COMMAND ----------
 
 from random import choices
+print(len(cv_model.vocabulary))
 choices(cv_model.vocabulary, k=10)
 
 # COMMAND ----------
@@ -102,18 +104,13 @@ from pyspark.ml.feature import StringIndexer
 si = StringIndexer(inputCol="source", outputCol="label")
 si_model = si.fit(wiki_data)
 wiki_data = si_model.transform(wiki_data)
-wiki_data.filter("source = 'metapedia'").show(5)
-wiki_data.filter("source = 'rational'").show(5)
+wiki_data.filter("source = 'metapedia'").limit(5).toPandas()
 
 # COMMAND ----------
 
 train, test = wiki_data.select("features", "label").randomSplit([0.8,0.2])
 print(train.count())
 print(test.count())
-
-# COMMAND ----------
-
-train.select("label").summary().show()
 
 # COMMAND ----------
 
@@ -137,8 +134,21 @@ print(f"Logistic regression F1 (binary) {binary_evaluator.evaluate(lr_prediction
 
 # COMMAND ----------
 
-# print("Coefficients: " + str(lr_model.coefficients))
-# print("Intercept: " + str(lr_model.intercept))
+words_and_coefficients = list(zip(cv_model.vocabulary, lr_model.coefficients))
+words_and_coefficients[:10]
+
+# COMMAND ----------
+
+words_and_coefficients_sorted = sorted(words_and_coefficients, key=lambda p: p[1], reverse=True)
+
+# COMMAND ----------
+
+words_and_coefficients_sorted[:10]
+
+# COMMAND ----------
+
+results = wiki_data.filter(wiki_data.sample_clean.contains("germanisches")).collect()
+results
 
 # COMMAND ----------
 
