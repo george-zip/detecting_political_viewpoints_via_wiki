@@ -1,14 +1,14 @@
 import csv
+import os.path
 import sys
 import re
 from datetime import datetime
-from typing import IO, Iterable
+from typing import IO, Iterable, List
 
 import nltk
-import wikitextparser as wtp
+import time
 import mwparserfromhell as mwp
 from mediawiki import MediaWiki
-from mediawiki.exceptions import PageError, DisambiguationError
 from ratelimit import limits, sleep_and_retry
 
 """
@@ -17,11 +17,11 @@ suitable for classification. Uses a wrapper around the MediaWiki API.
 Rate limits to avoid overwhelming MediaWiki end points on Wiki sites.  
 """
 
-user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)"\
-    "Chrome/98.0.4758.80 Safari/537.36"
+user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)" \
+             "Chrome/98.0.4758.80 Safari/537.36"
 
 wikis = {
-    "conservapedia": MediaWiki("https://www.conservapedia.com/api.php", user_agent=user_agent),
+    "conservapedia": MediaWiki("https://www.conservapedia.com/api.php"),
     "metapedia": MediaWiki("https://en.metapedia.org/m/api.php"),
     "wikipedia": MediaWiki(user_agent=user_agent),  # default is wikipedia
     "powerbase": MediaWiki("https://powerbase.info/api.php")
@@ -43,11 +43,6 @@ def get_page_text(wiki: MediaWiki, name: str, title: str) -> str:
     """
     try:
         page = wiki.page(title)
-    except (PageError, DisambiguationError) as e:
-        # note error but continue with other pages
-        print(f"Page {title} generates error on {name}")
-        return None
-    else:
         wiki_fied = page.wikitext
         if isinstance(wiki_fied, str):
             # return wtp.parse(wiki_fied).plain_text()
@@ -57,6 +52,10 @@ def get_page_text(wiki: MediaWiki, name: str, title: str) -> str:
             return mwp.parse(wiki_fied["*"]).strip_code()
         else:
             raise RuntimeError(f"Unexpected type {type(wiki_fied)} for title {title} on {name}")
+    except Exception as e:
+        # note error but continue with other pages
+        print(f"Page {title} generates error on {name}")
+        return None
 
 
 def write_to_corpus(name: str, file: IO[str], parser: Iterable) -> None:
@@ -99,28 +98,50 @@ def normalize(text: str) -> str:
     return text
 
 
+def get_page_titles(media_wiki: MediaWiki) -> List[str]:
+    all_pages = []
+    token = ""
+    while not token or ord(token[0]) < ord("z"):
+        print(token)
+        all_pages.extend(media_wiki.allpages(token, 500))
+        time.sleep(0.5)
+        if token and token[0] == all_pages[-1][0].lower():
+            if all_pages[-1][1].isalpha():
+                token = token[0] + all_pages[-1][1]
+            else:
+                token = token[0] + "a"
+        else:
+            token = all_pages[-1][0].lower()
+    return all_pages
+
+
+def corpus_file_name() -> str:
+    timestamp = f"{datetime.now().year}_{datetime.now().month}_{datetime.now().day}"
+    file_name = f"./data/wiki_corpus_{timestamp}.csv"
+    i = 1
+    while os.path.exists(file_name):
+        file_name = f"./data/wiki_corpus_{timestamp}_{i}.csv"
+        i += 1
+    return file_name
+
+
 if __name__ == '__main__':
 
-    num_pages = int(sys.argv[1]) if len(sys.argv) > 1 else 2
-
-    timestamp = f"{datetime.now().year}_{datetime.now().month}_{datetime.now().day}"
-    corpus_file = f"./data/wiki_corpus_{timestamp}.csv"
-
-    with open(corpus_file, "w") as output_file:
+    with open(corpus_file_name(), "w") as output_file:
         output_file.write("id,source,sentence\n")
         for wiki_name, media_wiki in wikis.items():
             sentence_count = 0
-            print(f"Processing {num_pages} from {wiki_name}")
-            page_titles = media_wiki.random(num_pages)
-            print(f"Page titles ({len(page_titles)}: {page_titles}")
+            page_titles = get_page_titles(media_wiki)
+            print(f"Retrieving {len(page_titles)} page titles from {wiki_name}")
             for page_title in page_titles:
                 print(f"Processing {page_title}")
                 raw_text = get_page_text(media_wiki, wiki_name, page_title)
-                text = normalize(raw_text)
                 if raw_text:
-                    sentence_count += write_to_corpus(
-                        wiki_name,
-                        output_file,
-                        nltk.sent_tokenize(text)
-                    )
+                    text = normalize(raw_text)
+                    if raw_text:
+                        sentence_count += write_to_corpus(
+                            wiki_name,
+                            output_file,
+                            nltk.sent_tokenize(text)
+                        )
             print(f"Wrote {sentence_count} sentences from {wiki_name}")
