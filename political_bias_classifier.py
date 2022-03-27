@@ -16,8 +16,6 @@ pd.set_option("max_colwidth", 800)
 
 # COMMAND ----------
 
-spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.access.key", "AKIAXVYORXEXHUCDZWGC")
-spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.secret.key", "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")
 
 # COMMAND ----------
 
