@@ -16,8 +16,6 @@ pd.set_option("max_colwidth", 800)
 
 # COMMAND ----------
 
-
-
 # COMMAND ----------
 
 # load rational wiki sentences
