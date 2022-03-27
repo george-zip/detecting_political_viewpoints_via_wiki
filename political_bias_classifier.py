@@ -16,7 +16,6 @@ pd.set_option("max_colwidth", 800)
 
 # COMMAND ----------
 
-
 # COMMAND ----------
 
 # load rational wiki sentences
@@ -112,7 +111,6 @@ from pyspark.ml.feature import RegexTokenizer, Tokenizer
 
 regex_tokenizer = RegexTokenizer(inputCol="sample", outputCol="words", gaps=False, pattern="[a-zA-Z]+")
 tokenized = regex_tokenizer.transform(cleaned)
-tokenized.show(5)
 
 # COMMAND ----------
 
@@ -133,6 +131,10 @@ tokenized = tokenized.filter(F.size(F.col("words")) > 1)
 tokenized_with_complexity = tokenized.withColumn("avg_syllables", avg_syllables(F.col("words")))
 tokenized_with_complexity = tokenized_with_complexity.withColumn("words_per_sentence", F.size(F.col("words")))
 tokenized_with_complexity.sample(True, 0.00002).select("words", "avg_syllables", "words_per_sentence").toPandas()
+
+# COMMAND ----------
+
+tokenized_with_complexity.rdd.getNumPartitions()
 
 # COMMAND ----------
 
@@ -197,9 +199,35 @@ lr_model.write().overwrite().save("/dbfs/FileStore/models/logistic_regression")
 
 # COMMAND ----------
 
-sources = cleaned_and_transformed.select("source").dropDuplicates().toLocalIterator()
-for source, measure in zip(sources, lr_model.summary.fMeasureByLabel()):
-  print(f"Source: {source} Measure {measure}")
+from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
+from pyspark.ml.classification import LogisticRegression
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+
+lr = LogisticRegression()
+
+# build parameter grids
+lr_params = ParamGridBuilder()\
+    .addGrid(lr.elasticNetParam, [0.0, 1.0])\
+    .addGrid(lr.regParam, [0.0, 1.0])\
+    .build()
+
+# set up cross-validation and establish evaulation criteria
+lr_cross_validator = CrossValidator(
+    estimator=lr,
+    estimatorParamMaps=lr_params,
+    evaluator=BinaryClassificationEvaluator(),
+    numFolds=2
+)
+
+trained_lr_model = lr_cross_validator.fit(train)
+
+lr_prediction = trained_lr_model.transform(test)
+f1 = BinaryClassificationEvaluator().evaluate(lr_prediction)
+print(f"Logistic regression F1 {f1:.3f}")
+
+# COMMAND ----------
+
+trained_lr_model.extractParamMap()
 
 # COMMAND ----------
 
@@ -214,12 +242,6 @@ print(f"Logistic regression F1 {bc_evaluator.evaluate(lr_predictions):.3f}")
 
 # COMMAND ----------
 
-arr = lr_model.coefficientMatrix.toArray()
-words_and_coefficients = list(zip(cv_model.vocabulary, arr[0]))
-sorted(words_and_coefficients, key=lambda p: p[1], reverse=False)[:10]
-
-# COMMAND ----------
-
 from pyspark.ml.classification import NaiveBayes
 
 nb = NaiveBayes()
@@ -227,6 +249,16 @@ nb_model = nb.fit(train)
 nb_predictions = nb_model.transform(test)
 nb_model.write().overwrite().save("/dbfs/FileStore/models/naive_bayes")
 print(f"Naive bayes F1 {bc_evaluator.evaluate(nb_predictions):.3f}")
+
+# COMMAND ----------
+
+from pyspark.ml.classification import LinearSVC
+
+# lsvc = LinearSVC(maxIter=10, regParam=0.1)
+# lsvc_model = lsvc.fit(train)
+# lsvc_predictions = lsvc_model.transform(test)
+bc_evaluator = BinaryClassificationEvaluator()
+print(f"Linear Support Vector Machine F1 {bc_evaluator.evaluate(lsvc_predictions):.3f}")
 
 # COMMAND ----------
 
