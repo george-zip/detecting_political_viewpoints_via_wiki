@@ -6,16 +6,22 @@
 import pyspark
 import numpy as np
 import pandas as pd
+import pickle
+import os
+from pyspark.sql.types import StructField, StructType, StringType
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+
 pd.set_option("max_colwidth", 800)
 
 # COMMAND ----------
 
-# load rational wiki sentences
-import pickle
-import os
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.access.key", "AKIAXVYORXEXHUCDZWGC")
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.secret.key", "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")
 
+# COMMAND ----------
+
+# load rational wiki sentences
 dir = "/dbfs/FileStore/tables"
 all_sentences = []
 for filename in os.listdir(dir):
@@ -25,18 +31,7 @@ for filename in os.listdir(dir):
           all_sentences.extend(tmp)
 
 rational_rdd = spark.sparkContext.parallelize(all_sentences, 100)
-
-# COMMAND ----------
-
-# label rational wiki sentences
 rational_rdd = rational_rdd.map(lambda x: ("rational", x))
-rational_rdd.count()
-
-# COMMAND ----------
-
-# create dataframe
-from pyspark.sql.types import StructField, StructType, StringType
-from pyspark.sql.functions import col
 
 rational_schema = StructType([
     StructField("source", StringType()),
@@ -46,12 +41,6 @@ rational_schema = StructType([
 rational_df = spark.createDataFrame(rational_rdd, rational_schema)
 rational_df = rational_df.dropDuplicates()
 rational_df.count()
-# rational_df.sample(True, 0.00001).toPandas()
-
-# COMMAND ----------
-
-spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.access.key", )
-spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.secret.key", )
 
 # COMMAND ----------
 
@@ -94,31 +83,29 @@ conservapedia_df.count()
 # create union of equal numbers of each corpus
 ratio = metapedia_df.count() / rational_df.count()
 all_df = rational_df\
-  .select(F.lit("left-wing").alias("source"), "sample")\
+  .select(F.lit("left").alias("source"), "sample")\
   .sample(True, ratio)\
-  .union(metapedia_df.select(F.lit("right-wing").alias("source"), "sample"))
+  .union(metapedia_df.select(F.lit("right").alias("source"), "sample"))
 ratio = metapedia_df.count() / powerbase_df.count() 
 all_df = all_df.union(powerbase_df\
-                      .select(F.lit("left-wing").alias("source"), "sample")\
+                      .select(F.lit("left").alias("source"), "sample")\
                       .sample(True, ratio))
 ratio = metapedia_df.count() / conservapedia_df.count() 
 all_df = all_df.union(conservapedia_df\
-                      .select(F.lit("right-wing").alias("source"), "sample")\
+                      .select(F.lit("right").alias("source"), "sample")\
                       .sample(True, ratio))
 all_df.count()
-
-# COMMAND ----------
-
-
 
 # COMMAND ----------
 
 # clean-ups
 from pyspark.sql.functions import regexp_replace
 
-all_df = all_df.select("source", regexp_replace(F.col("sample"), "(https?):\/\/(www\.)?[a-z0-9\.:].*?(?=\s)", "").alias("sample"))
-all_df = all_df.select("source", regexp_replace(F.col("sample"), "([a-zA-Z0-9_\-\.]+)@([a-zA-Z0-9_\-\.]+)\.([a-zA-Z]{2,5})", "").alias("sample"))
-all_df.show(5)
+cleaned = all_df.select("source", regexp_replace(F.col("sample"), "(https?):\/\/(www\.)?[a-z0-9\.:].*?(?=\s)", "").alias("sample"))
+cleaned = all_df.select(
+  "source", 
+  regexp_replace(F.col("sample"), "([a-zA-Z0-9_\-\.]+)@([a-zA-Z0-9_\-\.]+)\.([a-zA-Z]{2,5})", "").alias("sample")
+)
 
 # COMMAND ----------
 
@@ -126,11 +113,12 @@ all_df.show(5)
 from pyspark.ml.feature import RegexTokenizer, Tokenizer
 
 regex_tokenizer = RegexTokenizer(inputCol="sample", outputCol="words", gaps=False, pattern="[a-zA-Z]+")
-tokenized = regex_tokenizer.transform(all_df)
+tokenized = regex_tokenizer.transform(cleaned)
+tokenized.show(5)
 
 # COMMAND ----------
 
-# calculate flesch-kincaid score
+# calculate sentence complexity metrics
 from pyspark.sql.types import FloatType
 import syllapy
 
@@ -143,10 +131,10 @@ def avg_syllables(words):
   else:
     return 0.0
 
-tokenized = tokenized.filter(F.size(col("words")) > 1)
+tokenized = tokenized.filter(F.size(F.col("words")) > 1)
 tokenized_with_complexity = tokenized.withColumn("avg_syllables", avg_syllables(F.col("words")))
 tokenized_with_complexity = tokenized_with_complexity.withColumn("words_per_sentence", F.size(F.col("words")))
-tokenized_with_complexity.sample(True, 0.00002).toPandas()
+tokenized_with_complexity.sample(True, 0.00002).select("words", "avg_syllables", "words_per_sentence").toPandas()
 
 # COMMAND ----------
 
@@ -154,28 +142,33 @@ tokenized_with_complexity.sample(True, 0.00002).toPandas()
 from pyspark.ml.feature import CountVectorizer
 
 cv = CountVectorizer(inputCol="words", outputCol="vectorized_words")
-# tokenized_with_complexity = tokenized
-# cv = CountVectorizer(inputCol="words", outputCol="features")
 cv_model = cv.fit(tokenized_with_complexity)
 wiki_data = cv_model.transform(tokenized_with_complexity)
 
 # COMMAND ----------
 
-# merge term vectors with flesch kincaid score
-from pyspark.ml.feature import VectorAssembler
+# ngrams 
+from pyspark.ml.feature import NGram
+from pyspark.ml.feature import CountVectorizer
 
-vec_assembler = VectorAssembler(
-  inputCols=["words_per_sentence", "avg_syllables", "vectorized_words"],
-  outputCol="features"
-)
-wiki_data = vec_assembler.transform(wiki_data)
-# display(wiki_data.sample(True, 0.00002))
+bigram = NGram(inputCol="words", outputCol="ngrams", n=2)
+bigram = bigram.transform(tokenized_with_complexity).select("source", "ngrams", "avg_syllables", "words_per_sentence")
+
+cv = CountVectorizer(inputCol="ngrams", outputCol="vectorized")
+cv_model = cv.fit(bigram)
+wiki_data = cv_model.transform(bigram)
 
 # COMMAND ----------
 
-from random import choices
-print(len(cv_model.vocabulary))
-choices(cv_model.vocabulary, k=5)
+# merge ngrams with sentence complexity metrics
+from pyspark.ml.feature import VectorAssembler
+
+vec_assembler = VectorAssembler(
+  inputCols=["words_per_sentence", "avg_syllables", "vectorized"],
+  outputCol="features"
+)
+vectorized = vec_assembler.transform(wiki_data).select("source", "features")
+# display(wiki_data.sample(True, 0.00002))
 
 # COMMAND ----------
 
@@ -183,13 +176,13 @@ choices(cv_model.vocabulary, k=5)
 from pyspark.ml.feature import StringIndexer
 
 si = StringIndexer(inputCol="source", outputCol="label")
-si_model = si.fit(wiki_data)
-wiki_data = si_model.transform(wiki_data)
-wiki_data.select("source", "label").dropDuplicates().show()
+si_model = si.fit(vectorized)
+cleaned_and_transformed = si_model.transform(vectorized)
+cleaned_and_transformed.select("source", "label").dropDuplicates().show()
 
 # COMMAND ----------
 
-train, test = wiki_data.select("features", "label").randomSplit([0.8,0.2])
+train, test = cleaned_and_transformed.select("features", "label").randomSplit([0.8,0.2])
 print(train.count())
 print(test.count())
 
@@ -202,22 +195,24 @@ lr = LogisticRegression()
 lr_model = lr.fit(train)
 lr_predictions = lr_model.transform(test)
 lr_predictions.limit(5).show()
-lr_model.write().overwrite().save("/dbfs/FileStore/models/multinomial_logistic_regression")
+lr_model.write().overwrite().save("/dbfs/FileStore/models/logistic_regression")
 
 # COMMAND ----------
 
-print(lr_model.summary.fMeasureByLabel())
-# print(lr_model.summary.labels)
-wiki_data.select("source", "label").dropDuplicates().show()
+sources = cleaned_and_transformed.select("source").dropDuplicates().toLocalIterator()
+for source, measure in zip(sources, lr_model.summary.fMeasureByLabel()):
+  print(f"Source: {source} Measure {measure}")
 
 # COMMAND ----------
 
-from pyspark.ml.evaluation import MulticlassClassificationEvaluator, BinaryClassificationEvaluator
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
 
-mcc_evaluator = MulticlassClassificationEvaluator()
-print(f"Logistic regression F1 (multi-class) {mcc_evaluator.evaluate(lr_predictions):.3f}")
-# 0.7786 without sentence complexity metrics
-# 0.7798 with sentence complexity metrics
+bc_evaluator = BinaryClassificationEvaluator()
+print(f"Logistic regression F1 {bc_evaluator.evaluate(lr_predictions):.3f}")
+# 0.778 bag-of-words without sentence complexity metrics
+# 0.779 bag-of-words with sentence complexity metrics
+# 0.842 bi-grams with sentence complexity
+# 0.833 tri-grams with sentence complexity
 
 # COMMAND ----------
 
@@ -230,13 +225,10 @@ sorted(words_and_coefficients, key=lambda p: p[1], reverse=False)[:10]
 from pyspark.ml.classification import NaiveBayes
 
 nb = NaiveBayes()
-# print(dt.explainParams())
 nb_model = nb.fit(train)
 nb_predictions = nb_model.transform(test)
-# dt_predictions.limit(5).show()
 nb_model.write().overwrite().save("/dbfs/FileStore/models/naive_bayes")
-mcc_evaluator = MulticlassClassificationEvaluator()
-print(f"Naive bayes F1 (multi-class) {mcc_evaluator.evaluate(nb_predictions):.3f}")
+print(f"Naive bayes F1 {bc_evaluator.evaluate(nb_predictions):.3f}")
 
 # COMMAND ----------
 
