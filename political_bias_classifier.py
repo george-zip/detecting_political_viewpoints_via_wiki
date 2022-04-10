@@ -16,6 +16,8 @@ pd.set_option("max_colwidth", 800)
 
 # COMMAND ----------
 
+
+
 # COMMAND ----------
 
 # load rational wiki sentences
@@ -80,16 +82,16 @@ conservapedia_df.count()
 # create union of equal numbers of each corpus
 ratio = metapedia_df.count() / rational_df.count()
 all_df = rational_df\
-  .select(F.lit("left").alias("source"), "sample")\
+  .select(F.lit("liberal").alias("source"), "sample")\
   .sample(True, ratio)\
-  .union(metapedia_df.select(F.lit("right").alias("source"), "sample"))
+  .union(metapedia_df.select(F.lit("conservative").alias("source"), "sample"))
 ratio = metapedia_df.count() / powerbase_df.count() 
 all_df = all_df.union(powerbase_df\
-                      .select(F.lit("left").alias("source"), "sample")\
+                      .select(F.lit("liberal").alias("source"), "sample")\
                       .sample(True, ratio))
 ratio = metapedia_df.count() / conservapedia_df.count() 
 all_df = all_df.union(conservapedia_df\
-                      .select(F.lit("right").alias("source"), "sample")\
+                      .select(F.lit("conservative").alias("source"), "sample")\
                       .sample(True, ratio))
 all_df.count()
 
@@ -114,6 +116,10 @@ tokenized = regex_tokenizer.transform(cleaned)
 
 # COMMAND ----------
 
+# MAGIC %pip install syllapy
+
+# COMMAND ----------
+
 # calculate sentence complexity metrics
 from pyspark.sql.types import FloatType
 import syllapy
@@ -134,7 +140,8 @@ tokenized_with_complexity.sample(True, 0.00002).select("words", "avg_syllables",
 
 # COMMAND ----------
 
-tokenized_with_complexity.rdd.getNumPartitions()
+tokenized_with_complexity_partitioned = tokenized_with_complexity.repartition(30)
+tokenized_with_complexity_partitioned.rdd.getNumPartitions()
 
 # COMMAND ----------
 
@@ -142,8 +149,8 @@ tokenized_with_complexity.rdd.getNumPartitions()
 from pyspark.ml.feature import CountVectorizer
 
 cv = CountVectorizer(inputCol="words", outputCol="vectorized_words")
-cv_model = cv.fit(tokenized_with_complexity)
-wiki_data = cv_model.transform(tokenized_with_complexity)
+cv_model = cv.fit(tokenized_with_complexity_partitioned)
+wiki_data = cv_model.transform(tokenized_with_complexity_partitioned)
 
 # COMMAND ----------
 
@@ -190,12 +197,22 @@ print(test.count())
 
 # Logistic regression
 from pyspark.ml.classification import LogisticRegression
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
 
-lr = LogisticRegression()
+lr = LogisticRegression(regParam=0.1, elasticNetParam=0.0)
 lr_model = lr.fit(train)
 lr_predictions = lr_model.transform(test)
 lr_predictions.limit(5).show()
 lr_model.write().overwrite().save("/dbfs/FileStore/models/logistic_regression")
+
+bc_evaluator = BinaryClassificationEvaluator()
+print(f"Logistic regression F1 {bc_evaluator.evaluate(lr_predictions):.3f}")
+
+# COMMAND ----------
+
+# tokenized_with_complexity_partitioned = tokenized_with_complexity.repartition(100)
+# train.rdd.getNumPartitions( )
+# test.rdd.getNumPartitions()
 
 # COMMAND ----------
 
@@ -208,7 +225,7 @@ lr = LogisticRegression()
 # build parameter grids
 lr_params = ParamGridBuilder()\
     .addGrid(lr.elasticNetParam, [0.0, 1.0])\
-    .addGrid(lr.regParam, [0.0, 1.0])\
+    .addGrid(lr.regParam, [0.0, 0.1])\
     .build()
 
 # set up cross-validation and establish evaulation criteria
@@ -216,7 +233,7 @@ lr_cross_validator = CrossValidator(
     estimator=lr,
     estimatorParamMaps=lr_params,
     evaluator=BinaryClassificationEvaluator(),
-    numFolds=2
+    numFolds=5
 )
 
 trained_lr_model = lr_cross_validator.fit(train)
@@ -231,10 +248,15 @@ trained_lr_model.extractParamMap()
 
 # COMMAND ----------
 
+trained_lr_model.explainParams()
+trained_lr_model.write().overwrite().save("/dbfs/FileStore/models/logistic_regression_five_fold")
+
+# COMMAND ----------
+
 from pyspark.ml.evaluation import BinaryClassificationEvaluator
 
 bc_evaluator = BinaryClassificationEvaluator()
-print(f"Logistic regression F1 {bc_evaluator.evaluate(lr_predictions):.3f}")
+# print(f"Logistic regression F1 {bc_evaluator.evaluate(lr_predictions):.3f}")
 # 0.778 bag-of-words without sentence complexity metrics
 # 0.779 bag-of-words with sentence complexity metrics
 # 0.842 bi-grams with sentence complexity
@@ -242,30 +264,33 @@ print(f"Logistic regression F1 {bc_evaluator.evaluate(lr_predictions):.3f}")
 
 # COMMAND ----------
 
-from pyspark.ml.classification import NaiveBayes
+from pyspark.mllib.evaluation import BinaryClassificationMetrics, MulticlassMetrics
 
-nb = NaiveBayes()
-nb_model = nb.fit(train)
-nb_predictions = nb_model.transform(test)
-nb_model.write().overwrite().save("/dbfs/FileStore/models/naive_bayes")
-print(f"Naive bayes F1 {bc_evaluator.evaluate(nb_predictions):.3f}")
-
-# COMMAND ----------
-
-from pyspark.ml.classification import LinearSVC
-
-# lsvc = LinearSVC(maxIter=10, regParam=0.1)
-# lsvc_model = lsvc.fit(train)
-# lsvc_predictions = lsvc_model.transform(test)
-bc_evaluator = BinaryClassificationEvaluator()
-print(f"Linear Support Vector Machine F1 {bc_evaluator.evaluate(lsvc_predictions):.3f}")
+predictionAndLabels = lr_prediction.select("prediction", "label").rdd
+metrics = BinaryClassificationMetrics(predictionAndLabels)
+print(f"ROC {metrics.areaUnderROC}")
+print(f"PR {metrics.areaUnderPR}")
+multi_metrics = MulticlassMetrics(predictionAndLabels)
+precision_score = multi_metrics.weightedPrecision
+recall_score = multi_metrics.weightedRecall
+print(f"Precision {precision_score} Recall {recall_score}")
+###
+# ROC 0.785914065390302
+# PR 0.7467640481906745
+# WEIGHTED Precision 0.7884561420732441 Recall 0.78809749723903
+###
 
 # COMMAND ----------
 
-"""
-Next steps:
-3. Investigate better sentence segmentation
-4. Correlate coefficientMatrix back to words to see which words are making the most impact
-5. Try other classification models (Gradient boosted trees, naive bayes, ...)
-6. Make pipeline of transformations
-"""
+confusion_matrix = multi_metrics.confusionMatrix().toArray()
+print(confusion_matrix)
+# [[24973.  7347.]
+# [ 6276. 25693.]] 
+
+# COMMAND ----------
+
+trained_lr_model.bestModel.extractParamMap()
+
+# COMMAND ----------
+
+
