@@ -1,5 +1,15 @@
 # Databricks notebook source
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.access.key", dbutils.secrets.get("aws_s3", "access_key"))
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.secret.key", dbutils.secrets.get("aws_s3", "secret_key"))
+
+# COMMAND ----------
+
 # MAGIC %pip install syllapy
+
+# COMMAND ----------
+
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.access.key", dbutils.secrets.get("aws_s3", "access_key"))
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.secret.key", dbutils.secrets.get("aws_s3", "secret_key"))
 
 # COMMAND ----------
 
@@ -13,10 +23,6 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 pd.set_option("max_colwidth", 800)
-
-# COMMAND ----------
-
-
 
 # COMMAND ----------
 
@@ -116,10 +122,6 @@ tokenized = regex_tokenizer.transform(cleaned)
 
 # COMMAND ----------
 
-# MAGIC %pip install syllapy
-
-# COMMAND ----------
-
 # calculate sentence complexity metrics
 from pyspark.sql.types import FloatType
 import syllapy
@@ -136,21 +138,16 @@ def avg_syllables(words):
 tokenized = tokenized.filter(F.size(F.col("words")) > 1)
 tokenized_with_complexity = tokenized.withColumn("avg_syllables", avg_syllables(F.col("words")))
 tokenized_with_complexity = tokenized_with_complexity.withColumn("words_per_sentence", F.size(F.col("words")))
-tokenized_with_complexity.sample(True, 0.00002).select("words", "avg_syllables", "words_per_sentence").toPandas()
-
-# COMMAND ----------
-
-tokenized_with_complexity_partitioned = tokenized_with_complexity.repartition(30)
-tokenized_with_complexity_partitioned.rdd.getNumPartitions()
+# tokenized_with_complexity.sample(True, 0.00002).select("words", "avg_syllables", "words_per_sentence").toPandas()
 
 # COMMAND ----------
 
 # term frequency vectors
-from pyspark.ml.feature import CountVectorizer
+# from pyspark.ml.feature import CountVectorizer
 
-cv = CountVectorizer(inputCol="words", outputCol="vectorized_words")
-cv_model = cv.fit(tokenized_with_complexity_partitioned)
-wiki_data = cv_model.transform(tokenized_with_complexity_partitioned)
+# cv = CountVectorizer(inputCol="words", outputCol="vectorized_words")
+# cv_model = cv.fit(tokenized_with_complexity)
+# wiki_data = cv_model.transform(tokenized_with_complexity)
 
 # COMMAND ----------
 
@@ -210,9 +207,7 @@ print(f"Logistic regression F1 {bc_evaluator.evaluate(lr_predictions):.3f}")
 
 # COMMAND ----------
 
-# tokenized_with_complexity_partitioned = tokenized_with_complexity.repartition(100)
-# train.rdd.getNumPartitions( )
-# test.rdd.getNumPartitions()
+lr_predictions.select
 
 # COMMAND ----------
 
@@ -266,7 +261,7 @@ bc_evaluator = BinaryClassificationEvaluator()
 
 from pyspark.mllib.evaluation import BinaryClassificationMetrics, MulticlassMetrics
 
-predictionAndLabels = lr_prediction.select("prediction", "label").rdd
+predictionAndLabels = lr_predictions.select("prediction", "label").rdd
 metrics = BinaryClassificationMetrics(predictionAndLabels)
 print(f"ROC {metrics.areaUnderROC}")
 print(f"PR {metrics.areaUnderPR}")
@@ -279,6 +274,16 @@ print(f"Precision {precision_score} Recall {recall_score}")
 # PR 0.7467640481906745
 # WEIGHTED Precision 0.7884561420732441 Recall 0.78809749723903
 ###
+
+# COMMAND ----------
+
+precision = multi_metrics.precision(0.0)
+recall = multi_metrics.recall(0.0)
+f1Score = multi_metrics.fMeasure(0.0)
+print("Summary Stats")
+print("Precision = %s" % precision)
+print("Recall = %s" % recall)
+print("F1 Score = %s" % f1Score)
 
 # COMMAND ----------
 
