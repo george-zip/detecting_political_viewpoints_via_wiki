@@ -1,5 +1,6 @@
 # Databricks notebook source
 # MAGIC %pip install syllapy
+# MAGIC %pip install gensim
 
 # COMMAND ----------
 
@@ -97,8 +98,8 @@ ratio = metapedia_df.count() / conservapedia_df.count()
 all_df = all_df.union(conservapedia_df\
                       .select(F.lit("conservative").alias("source"), "sample")\
                       .sample(True, ratio))
-print(f"Total records {all_df.count()}")
-all_df.printSchema()
+# print(f"Total records {all_df.count()}")
+# all_df.printSchema()
 
 # COMMAND ----------
 
@@ -111,6 +112,35 @@ cleaned = cleaned.select(
   "source", 
   regexp_replace(F.col("sample"), "([a-zA-Z0-9_\-\.]+)@([a-zA-Z0-9_\-\.]+)\.([a-zA-Z]{2,5})", "").alias("sample")
 )
+
+# COMMAND ----------
+
+import gensim.parsing.preprocessing as gsp
+from gensim import utils
+import re
+
+filters = [
+  gsp.strip_tags, 
+  gsp.strip_punctuation,
+  gsp.strip_multiple_whitespaces,
+  gsp.strip_numeric,
+  gsp.strip_short, 
+  gsp.stem_text
+]
+
+def clean_text(df):
+  s = df.sample
+  s = s.lower()
+  s = utils.to_unicode(s)
+  for f in filters:
+    s = f(s)
+  return (df.source, s)
+
+input_rdd = cleaned.rdd.map(lambda x : clean_text(x))
+
+# COMMAND ----------
+
+input_df = input_rdd.toDF(['source','sample'])
 
 # COMMAND ----------
 
@@ -141,47 +171,46 @@ class SentenceComplexity(Transformer, Identifiable):
     return [self.syllablesCol, self.wordsCol]
     
   def _transform(self, dataset):
-    tmp = dataset.filter(F.size(F.col(self.inputCol)) > 1)
-    return tmp.withColumn(self.syllablesCol, avg_syllables(F.col(self.inputCol)))\
+    return dataset.withColumn(self.syllablesCol, avg_syllables(F.col(self.inputCol)))\
       .withColumn(self.wordsCol, F.size(F.col(self.inputCol)))
 
 # COMMAND ----------
 
-train, test = cleaned.randomSplit([0.8,0.2])
-print(train.count())
-print(test.count())
+train, test = input_df.randomSplit([0.8,0.2])
+# print(train.count())
+# print(test.count())
 
 # COMMAND ----------
 
 # construct and fit pipeline
-from pyspark.ml.feature import RegexTokenizer, CountVectorizer, NGram, StringIndexer, VectorAssembler, Word2Vec
+from pyspark.ml.feature import RegexTokenizer, Tokenizer, CountVectorizer, NGram, StringIndexer, VectorAssembler, Word2Vec
 from pyspark.ml.classification import LogisticRegression, RandomForestClassifier
 from pyspark.ml import Pipeline
 
 # break text into words
-regex_tokenizer = RegexTokenizer(inputCol="sample", outputCol="words", gaps=False, pattern="[a-zA-Z]+")
+tokenizer = Tokenizer(inputCol="sample", outputCol="words")
+# tokenizer = RegexTokenizer(inputCol="sample", outputCol="words", gaps=False, pattern="[a-zA-Z]+")
 # construct bigrams
-# bigrams = NGram(inputCol=regex_tokenizer.getOutputCol(), outputCol="ngrams", n=2)
+bigrams = NGram(inputCol=tokenizer.getOutputCol(), outputCol="ngrams", n=2)
 # vectorize bigrams by count
-# bigram_vectorizer = CountVectorizer(inputCol=bigrams.getOutputCol(), outputCol="ngrams_vectorized")
+bigram_vectorizer = CountVectorizer(inputCol=bigrams.getOutputCol(), outputCol="features")
 # add sentence complexity measures
-# sentence_complexity = SentenceComplexity(inputCol=regex_tokenizer.getOutputCol())
+sentence_complexity = SentenceComplexity(inputCol=tokenizer.getOutputCol())
 # add unigrams
-unigrams = CountVectorizer(inputCol=regex_tokenizer.getOutputCol(), outputCol="uni_vecs")
-word2vec = Word2Vec(inputCol=regex_tokenizer.getOutputCol(), outputCol="word2vec")
+unigrams = CountVectorizer(inputCol=tokenizer.getOutputCol(), outputCol="features")
+# word2vec = Word2Vec(inputCol=tokenizer.getOutputCol(), outputCol="word2vec")
 # combine bigram and sentence complexity measures into single feature vector
 vec_assembler = VectorAssembler(
-  inputCols= [unigrams.getOutputCol(), word2vec.getOutputCol()],
+  inputCols= sentence_complexity.getOutputCols() + [unigrams.getOutputCol()],
   outputCol="features"
 )
 # generate numeric label column 
 si = StringIndexer(inputCol="source", outputCol="label")
 # best model using Ridge Regression
-# lr = LogisticRegression(regParam=0.1, elasticNetParam=0.0, threshold=0.5)
-rf = RandomForestClassifier()
-pipeline = Pipeline(stages=[regex_tokenizer, word2vec, unigrams, vec_assembler, si, rf])
+lr = LogisticRegression(regParam=0.1, elasticNetParam=0.0, threshold=0.5)
+pipeline = Pipeline(stages=[tokenizer, bigrams, bigram_vectorizer, si, lr])
 
-# model = pipeline.fit(train)
+model = pipeline.fit(train)
 # model.save("/dbfs/FileStore/models/logistic_regression_pipeline")
 
 # COMMAND ----------
@@ -237,6 +266,14 @@ plt.title('ROC curve')
 plt.xlabel('False Positive Rate')
 plt.ylabel('True Positive rate')
 plt.show()
+
+# COMMAND ----------
+
+# print(len(model.stages[1].vocabulary))
+# print(model.stages[-1].coefficients)
+words_and_coefficients = list(zip(model.stages[2].vocabulary, model.stages[-1].coefficients))
+print(sorted(words_and_coefficients, key=lambda p: p[1], reverse=True)[:10])
+
 
 # COMMAND ----------
 
