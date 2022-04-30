@@ -1,6 +1,12 @@
 # Databricks notebook source
 # MAGIC %pip install syllapy
 # MAGIC %pip install gensim
+# MAGIC %pip install spacy
+
+# COMMAND ----------
+
+import spacy
+!python -m spacy download en_core_web_sm
 
 # COMMAND ----------
 
@@ -25,6 +31,8 @@ csv_schema = StructType([
 ])
 
 pd.set_option("max_colwidth", 800)
+
+nlp = spacy.load("en_core_web_sm")
 
 # COMMAND ----------
 
@@ -79,9 +87,13 @@ def load_conservapedia_corpus(schema=csv_schema):
 # COMMAND ----------
 
 rational_df = load_rational_corpus()
+print(f"rational records {rational_df.count()}")
 metapedia_df = load_metapedia_corpus()
+print(f"metapedia records {metapedia_df.count()}")
 powerbase_df = load_powerbase_corpus()
+print(f"powerbase records {powerbase_df.count()}")
 conservapedia_df = load_conservapedia_corpus()
+print(f"conservapedia records {conservapedia_df.count()}")
 
 # merge with equal numbers of each dataset
 # partition the dataset into conservative and liberal
@@ -98,8 +110,7 @@ ratio = metapedia_df.count() / conservapedia_df.count()
 all_df = all_df.union(conservapedia_df\
                       .select(F.lit("conservative").alias("source"), "sample")\
                       .sample(True, ratio))
-# print(f"Total records {all_df.count()}")
-# all_df.printSchema()
+print(f"Total records {all_df.count()}")
 
 # COMMAND ----------
 
@@ -119,24 +130,27 @@ import gensim.parsing.preprocessing as gsp
 from gensim import utils
 import re
 
-filters = [
-  gsp.strip_tags, 
-  gsp.strip_punctuation,
-  gsp.strip_multiple_whitespaces,
-  gsp.strip_numeric,
-  gsp.strip_short, 
-  gsp.stem_text
-]
+def preprocess(df):
+  filters = [
+    gsp.strip_tags, 
+    gsp.strip_punctuation,
+    gsp.strip_multiple_whitespaces,
+    gsp.strip_numeric,
+    gsp.strip_short, 
+    gsp.remove_stopwords
+  ]
 
-def clean_text(df):
-  s = df.sample
-  s = s.lower()
-  s = utils.to_unicode(s)
-  for f in filters:
-    s = f(s)
-  return (df.source, s)
+  def clean_text(df):
+    s = df.sample
+    s = s.lower()
+    s = utils.to_unicode(s)
+    for f in filters:
+      s = f(s)
+    return (df.source, s)
+  
+  return df.rdd.map(lambda x : clean_text(x))
 
-input_rdd = cleaned.rdd.map(lambda x : clean_text(x))
+input_rdd = preprocess(cleaned)
 
 # COMMAND ----------
 
@@ -145,10 +159,11 @@ input_df = input_rdd.toDF(['source','sample'])
 # COMMAND ----------
 
 import syllapy
-from pyspark.sql.types import FloatType
+from pyspark.sql.types import FloatType, IntegerType, StringType, MapType
 from pyspark import keyword_only
 from pyspark.ml import Transformer
-from pyspark.ml.util import Identifiable
+from pyspark.ml.util import Identifiable, DefaultParamsWritable
+from collections import Counter
 
 @F.udf(returnType=FloatType())
 def avg_syllables(words):
@@ -159,6 +174,20 @@ def avg_syllables(words):
   else:
     return 0.0
 
+@F.udf(returnType=FloatType())
+def avg_chars(words):
+  total_words = len(words)
+  if total_words:
+    return sum([len(w) for w in words]) / total_words
+  else:
+    return 0.0  
+  
+def lexical_category(text):
+  doc = nlp(text)
+  return dict(Counter([token.pos_ for token in doc]))
+
+adjectives_udf = udf(lambda c: lexical_category(c), MapType(StringType(), IntegerType()))
+  
 class SentenceComplexity(Transformer, Identifiable):
   
   @keyword_only
@@ -166,19 +195,42 @@ class SentenceComplexity(Transformer, Identifiable):
     self.inputCol = inputCol
     self.syllablesCol = "avg_syllables"
     self.wordsCol = "words_per_sentence"
+    self.charsCol = "avg_chars"
     
   def getOutputCols(self):
-    return [self.syllablesCol, self.wordsCol]
+    return [
+              self.syllablesCol, self.wordsCol, self.charsCol,
+              "adj_ratio", "n_ratio", "v_ratio", "adv_ratio", 
+              "c_ratio"
+           ]
     
   def _transform(self, dataset):
-    return dataset.withColumn(self.syllablesCol, avg_syllables(F.col(self.inputCol)))\
-      .withColumn(self.wordsCol, F.size(F.col(self.inputCol)))
+    step1 = dataset\
+      .withColumn("pos_count", adjectives_udf(F.col("sample")))\
+      .withColumn(self.syllablesCol, avg_syllables(F.col(self.inputCol)))\
+      .withColumn(self.wordsCol, F.size(F.col(self.inputCol)))\
+      .withColumn(self.charsCol, avg_chars(F.col(self.inputCol)))
+    
+    step2 = step1\
+      .withColumn("adj_ratio", F.element_at(step1.pos_count, F.lit("ADJ")) / F.col(self.wordsCol))\
+      .withColumn("n_ratio", F.element_at(step1.pos_count, F.lit("NOUN")) / F.col(self.wordsCol))\
+      .withColumn("v_ratio", F.element_at(step1.pos_count, F.lit("VERB")) / F.col(self.wordsCol))\
+      .withColumn("co_count", F.element_at(step1.pos_count, F.lit("CONJ")))\
+      .withColumn("cc_count", F.element_at(step1.pos_count, F.lit("CCONJ")))\
+      .withColumn("sc_count", F.element_at(step1.pos_count, F.lit("SCONJ")))\
+      .withColumn("adv_ratio", F.element_at(step1.pos_count, F.lit("ADV")) / F.col(self.wordsCol))
+    
+    step3 = step2\
+      .na.fill(0)\
+      .withColumn("c_ratio", (F.col("co_count") + F.col("cc_count") + F.col("sc_count")) / F.col(self.wordsCol))
+    
+    return step3.fillna(0)
 
 # COMMAND ----------
 
-train, test = input_df.randomSplit([0.8,0.2])
-# print(train.count())
-# print(test.count())
+training_set, test_set = input_df.randomSplit([0.8,0.2])
+print(training_set.count())
+print(test_set.count())
 
 # COMMAND ----------
 
@@ -189,59 +241,57 @@ from pyspark.ml import Pipeline
 
 # break text into words
 tokenizer = Tokenizer(inputCol="sample", outputCol="words")
-# tokenizer = RegexTokenizer(inputCol="sample", outputCol="words", gaps=False, pattern="[a-zA-Z]+")
-# construct bigrams
-bigrams = NGram(inputCol=tokenizer.getOutputCol(), outputCol="ngrams", n=2)
+# construct ngrams
+ngrams = NGram(inputCol=tokenizer.getOutputCol(), outputCol="ngrams", n=1)
 # vectorize bigrams by count
-bigram_vectorizer = CountVectorizer(inputCol=bigrams.getOutputCol(), outputCol="features")
+ngrams_vectorizer = CountVectorizer(inputCol=ngrams.getOutputCol(), outputCol="ngrams_vec")
 # add sentence complexity measures
 sentence_complexity = SentenceComplexity(inputCol=tokenizer.getOutputCol())
-# add unigrams
-unigrams = CountVectorizer(inputCol=tokenizer.getOutputCol(), outputCol="features")
-# word2vec = Word2Vec(inputCol=tokenizer.getOutputCol(), outputCol="word2vec")
-# combine bigram and sentence complexity measures into single feature vector
+# combine ngram and sentence complexity measures into single feature vector
 vec_assembler = VectorAssembler(
-  inputCols= sentence_complexity.getOutputCols() + [unigrams.getOutputCol()],
+  inputCols= sentence_complexity.getOutputCols() + [ngrams_vectorizer.getOutputCol()],
   outputCol="features"
 )
 # generate numeric label column 
 si = StringIndexer(inputCol="source", outputCol="label")
 # best model using Ridge Regression
-lr = LogisticRegression(regParam=0.1, elasticNetParam=0.0, threshold=0.5)
-pipeline = Pipeline(stages=[tokenizer, bigrams, bigram_vectorizer, si, lr])
+lr = LogisticRegression(regParam=0.1, elasticNetParam=0.0)
+pipeline = Pipeline(stages=[tokenizer, sentence_complexity, ngrams, ngrams_vectorizer, vec_assembler, si, lr])
 
-model = pipeline.fit(train)
-# model.save("/dbfs/FileStore/models/logistic_regression_pipeline")
-
-# COMMAND ----------
-
-lr_predictions = model.transform(test).select("label", "prediction", "rawPrediction", "probability")
-# lr_predictions.sample(True, 0.0002).toPandas()""
+model = pipeline.fit(training_set)
 
 # COMMAND ----------
 
-results = lr_predictions.toPandas()
-                  
-tp = results[(results.label == 1.0) & (results.prediction == 1.0)].prediction.count()
-tn = results[(results.label == 0.0) & (results.prediction == 0.0)].prediction.count()
-fp = results[(results.label == 0.0) & (results.prediction == 1.0)].prediction.count()
-fn = results[(results.label == 1.0) & (results.prediction == 0.0)].prediction.count()
+lr_predictions = model.transform(test_set)
 
-total = results.prediction.count()
-print(f"Total test results: {total:,}")
-print(f"Test set skew {results.skew()[0]:.3f}")
-print(f"True positives: {tp:,}")
-print(f"True negatives: {tn:,}")
-print(f"False positives: {fp:,}")
-print(f"False negatives: {fn:,}")
-accuracy = (tp + tn) / total
-print(f"Accuracy: {accuracy:.3f}")
-recall = tp / (tp + fn)
-print(f"Recall: {recall:.3f}")
-precision = tp / (tp + fp)
-print(f"Precision: {precision:.3f}")
-f1 = 2 * ((precision * recall) / (precision + recall))
-print(f"F1 score: {f1:.3f}")
+# COMMAND ----------
+
+def print_accuracy_measures(predictions):
+  results = predictions.toPandas()
+
+  tp = results[(results.label == 1.0) & (results.prediction == 1.0)].prediction.count()
+  tn = results[(results.label == 0.0) & (results.prediction == 0.0)].prediction.count()
+  fp = results[(results.label == 0.0) & (results.prediction == 1.0)].prediction.count()
+  fn = results[(results.label == 1.0) & (results.prediction == 0.0)].prediction.count()
+
+  total = results.prediction.count()
+  print(f"Total test results: {total:,}")
+  print(f"Test set skew {results.skew()[0]:.3f}")
+  print(f"True positives: {tp:,}")
+  print(f"True negatives: {tn:,}")
+  print(f"False positives: {fp:,}")
+  print(f"False negatives: {fn:,}")
+  accuracy = (tp + tn) / total
+  print(f"Accuracy: {accuracy:.3f}")
+  recall = tp / (tp + fn)
+  print(f"Recall: {recall:.3f}")
+  precision = tp / (tp + fp)
+  print(f"Precision: {precision:.3f}")
+  f1 = 2 * ((precision * recall) / (precision + recall))
+  print(f"F1 score: {f1:.3f}")
+  return results
+
+results = print_accuracy_measures(lr_predictions.select("label", "prediction", "probability"))
 
 # COMMAND ----------
 
@@ -269,11 +319,61 @@ plt.show()
 
 # COMMAND ----------
 
-# print(len(model.stages[1].vocabulary))
-# print(model.stages[-1].coefficients)
-words_and_coefficients = list(zip(model.stages[2].vocabulary, model.stages[-1].coefficients))
-print(sorted(words_and_coefficients, key=lambda p: p[1], reverse=True)[:10])
 
+sentence_complexity_cols = [
+  "avg_syllables", "words_per_sentence", "avg_chars",
+  "adj_ratio", "n_ratio", "v_ratio", "adv_ratio", 
+  "c_ratio"
+]
+features = sentence_complexity_cols + model.stages[3].vocabulary
+features_and_coefficients = list(zip(features, model.stages[-1].coefficients))
+feature_map = {p[0]:p[1] for p in sorted(features_and_coefficients, key=lambda p: p[1], reverse=True)}
+
+
+# COMMAND ----------
+
+for f in feature_map:
+  if f in sentence_complexity_cols:
+    print(f"{f}: {feature_map[f]}")
+
+# COMMAND ----------
+
+sorted(features_and_coefficients, key=lambda p: p[1], reverse=True)[:20]
+
+# COMMAND ----------
+
+speeches_schema = StructType([
+  StructField("source", StringType()),
+  StructField("sample", StringType()),
+])
+
+speeches_df = spark.read.schema(speeches_schema)\
+  .option("header", "true")\
+  .csv("s3://wallerstein-wikipedia-bias/political_speeches/test_set.csv").dropDuplicates()
+
+print(speeches_df.count())
+speeches_cleaned = preprocess(speeches_df)
+lr_speech_predictions = model.transform(speeches_df)
+
+# COMMAND ----------
+
+results = print_accuracy_measures(lr_speech_predictions.select("label", "prediction", "probability"))
+
+# COMMAND ----------
+
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+
+bc_evaluator = BinaryClassificationEvaluator()
+evaluation = bc_evaluator.evaluate(lr_speech_predictions)
+print(f"Area under ROC {evaluation:.3f}")
+
+# COMMAND ----------
+
+lr_speech_predictions\
+  .groupBy("source").avg(\
+  "adj_ratio", "n_ratio", "v_ratio", 
+  "avg_syllables", "avg_chars", "words_per_sentence",
+  "c_ratio", "adv_ratio").show()
 
 # COMMAND ----------
 
